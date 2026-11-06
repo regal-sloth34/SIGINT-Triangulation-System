@@ -1,5 +1,3 @@
-let rowCount = 0;
-
 // API key is entered in the app and kept in localStorage
 const API_KEY_STORAGE_KEY = 'sigint-triangulation-api-key';
 
@@ -105,6 +103,32 @@ const TARGET_ICON = {
     ]
 };
 
+const POI_ICON = {
+    size: [16, 16],
+    anchor: [8, 8],
+    parts: [
+        { d: 'M2 8 a6 6 0 1 0 12 0 a6 6 0 1 0 -12 0', fill: 'color', stroke: '#ffffff', width: 2 }
+    ]
+};
+
+// Broadcast symbol ((•)) for transmitters / signal sources
+const TX_WAVES = 'M21.3 6.7 A7.5 7.5 0 0 1 21.3 17.3 M10.7 6.7 A7.5 7.5 0 0 0 10.7 17.3 ' +
+    'M24.49 3.51 A12 12 0 0 1 24.49 20.49 M7.51 3.51 A12 12 0 0 0 7.51 20.49';
+const TX_ICON = {
+    size: [32, 24],
+    anchor: [16, 12],
+    parts: [
+        { d: TX_WAVES, stroke: OUTLINE, width: 4.5 },
+        { d: TX_WAVES, stroke: 'color', width: 2 },
+        { d: 'M12.5 12 a3.5 3.5 0 1 0 7 0 a3.5 3.5 0 1 0 -7 0', fill: 'color', stroke: OUTLINE, width: 1.5 }
+    ]
+};
+
+const POI_TYPES = {
+    poi: { label: 'POI', icon: POI_ICON, color: '#be4bdb' },
+    transmitter: { label: 'Transmitter', icon: TX_ICON, color: '#ff922b' }
+};
+
 function iconSvg(icon, color) {
     const [w, h] = icon.size;
     const paths = icon.parts.map(part => {
@@ -132,85 +156,169 @@ const targetIcon = L.divIcon({
     iconAnchor: TARGET_ICON.anchor
 });
 
-// Add a new row
-function addRow(values = {}) {
-    const tableBody = document.getElementById('input-rows');
-    rowCount++;
-    const row = document.createElement('tr');
-    row.innerHTML = `
-        <td><input type="checkbox" name="enabled-${rowCount}" title="Include this receiver" checked></td>
-        <td><input type="text" name="name-${rowCount}" placeholder="RX ${rowCount} (optional)"></td>
-        <td><input type="text" name="position-${rowCount}" placeholder="Lat,Lng" required></td>
-        <td><input type="text" name="bearing-${rowCount}" inputmode="decimal" placeholder="45 or 40-55" required></td>
-        <td><button type="button" class="danger" onclick="removeRow(this)">Remove</button></td>
-    `;
-    ['name', 'position', 'bearing'].forEach(field => {
-        if (values[field] !== undefined) rowField(row, field).value = values[field];
+// Receivers stay in the list between signals; for each signal you only tick the ones
+// that received it and enter their bearings
+let receivers = []; // { id, name, position, bearing, enabled }, text as typed
+let receiverCount = 0;
+
+function addReceiver(values = {}) {
+    receiverCount++;
+    receivers.push({
+        id: receiverCount,
+        name: values.name || '',
+        position: values.position || '',
+        bearing: values.bearing || '',
+        enabled: values.enabled ?? Boolean(values.bearing)
     });
-    const enabled = rowField(row, 'enabled');
-    enabled.checked = values.enabled !== false;
-    row.classList.toggle('row-disabled', !enabled.checked);
-    enabled.addEventListener('change', () => row.classList.toggle('row-disabled', !enabled.checked));
-    tableBody.appendChild(row);
+    renderReceivers();
     drawVectors();
     saveState();
 }
 
-// Get a row's input by field (enabled, name, position, bearing)
-function rowField(row, field) {
-    return row.querySelector(`input[name^="${field}-"]`);
-}
-
-function isRowEnabled(row) {
-    return rowField(row, 'enabled').checked;
-}
-
-// Remove a specific row
-function removeRow(button) {
-    const row = button.parentNode.parentNode;
-    row.remove();
+function removeReceiver(receiver) {
+    if (receiver.position.trim() && !confirm(`Remove receiver ${receiverName(receiver)}?`)) return;
+    receivers = receivers.filter(r => r !== receiver);
+    renderReceivers();
     drawVectors();
     saveState();
+}
+
+function receiverName(receiver) {
+    return receiver.name.trim() || `RX ${receivers.indexOf(receiver) + 1}`;
+}
+
+function receiverColor(receiver) {
+    return `hsl(${(receivers.indexOf(receiver) * 360) / receivers.length}, 100%, 50%)`;
+}
+
+function textInput(value, placeholder) {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = value;
+    input.placeholder = placeholder;
+    return input;
+}
+
+function colorSwatch(color) {
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = color;
+    return swatch;
+}
+
+// Build both views of the receivers: the station list (name, location) and the
+// signal list (received checkbox, bearing)
+function renderReceivers() {
+    const stationList = document.getElementById('receiver-list');
+    const bearingList = document.getElementById('bearing-list');
+    stationList.innerHTML = '';
+    bearingList.innerHTML = '';
+    document.getElementById('receiver-empty').hidden = receivers.length > 0;
+    document.getElementById('bearing-empty').hidden = receivers.length > 0;
+
+    receivers.forEach((receiver, index) => {
+        const color = receiverColor(receiver);
+
+        const bearingItem = document.createElement('div');
+        bearingItem.className = 'bearing-item';
+        const label = document.createElement('label');
+        const enabled = document.createElement('input');
+        enabled.type = 'checkbox';
+        enabled.checked = receiver.enabled;
+        enabled.title = 'Received this signal';
+        const nameText = document.createElement('span');
+        nameText.className = 'bearing-name';
+        label.append(enabled, colorSwatch(color), nameText);
+        const bearing = textInput(receiver.bearing, '45 or 40-55');
+        bearing.inputMode = 'decimal';
+        bearingItem.append(label, bearing);
+        bearingList.appendChild(bearingItem);
+
+        const stationItem = document.createElement('div');
+        stationItem.className = 'receiver-item';
+        const name = textInput(receiver.name, `RX ${index + 1}`);
+        const position = textInput(receiver.position, 'Lat,Lng');
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'icon-button danger-hover';
+        remove.title = 'Remove receiver';
+        remove.textContent = '✕';
+        stationItem.append(colorSwatch(color), name, position, remove);
+        stationList.appendChild(stationItem);
+
+        const refresh = () => {
+            const located = parseCoords(receiver.position) !== null;
+            nameText.textContent = receiverName(receiver);
+            nameText.title = located ? receiver.position : 'No valid location set for this receiver';
+            bearingItem.classList.toggle('off', !receiver.enabled);
+            bearingItem.classList.toggle('unlocated', !located);
+            position.classList.toggle('invalid', receiver.position.trim() !== '' && !located);
+            bearing.classList.toggle('invalid',
+                receiver.bearing.trim() !== '' && !isValidBearing(parseBearing(receiver.bearing).bearing));
+        };
+        const changed = () => {
+            refresh();
+            drawVectors();
+            saveState();
+        };
+
+        name.addEventListener('input', () => { receiver.name = name.value; changed(); });
+        position.addEventListener('input', () => { receiver.position = position.value; changed(); });
+        bearing.addEventListener('input', () => {
+            receiver.bearing = bearing.value;
+            // Entering a bearing means this receiver got the signal
+            if (bearing.value.trim()) enabled.checked = receiver.enabled = true;
+            changed();
+        });
+        enabled.addEventListener('change', () => { receiver.enabled = enabled.checked; changed(); });
+        remove.addEventListener('click', () => removeReceiver(receiver));
+        refresh();
+    });
+}
+
+// Start a new signal: keep the receivers, clear the bearings and report fields
+function newSignal() {
+    receivers.forEach(receiver => {
+        receiver.bearing = '';
+        receiver.enabled = false;
+    });
+    ['report-time', 'report-sign', 'report-freq'].forEach(id => { document.getElementById(id).value = ''; });
+    renderReceivers();
+    drawVectors();
+    clearTarget();
 }
 
 // Process the input data
 function processData() {
-    const loadingSpinner = document.getElementById('process-loading');
-    loadingSpinner.style.display = 'inline-block';
-
-    const rows = Array.from(document.querySelectorAll('#input-rows tr')).filter(isRowEnabled);
-    if (rows.length < 2) {
-        alert('At least two enabled signal sources are required for triangulation.');
-        loadingSpinner.style.display = 'none';
+    const active = receivers.filter(r => r.enabled);
+    if (active.length < 2) {
+        alert('Tick at least two receivers that received the signal.');
         return;
     }
 
     try {
-        const data = rows.map(row => {
-            const d = readRow(row);
+        const data = active.map(receiver => {
+            const d = readReceiver(receiver);
             if (!d.position) {
-                throw new Error('Invalid coordinates format. Use Lat,Lng format with valid ranges.');
+                throw new Error(`${d.name}: invalid location. Use Lat,Lng format with valid ranges.`);
             }
             if (!isValidBearing(d.bearing)) {
-                throw new Error('Bearing must be a number from 0 to 360, or a range like 40-55.');
+                throw new Error(`${d.name}: bearing must be a number from 0 to 360, or a range like 40-55.`);
             }
             return d;
         });
 
         calculateIntersection(data);
-        loadingSpinner.style.display = 'none';
-        document.getElementById('confidence-level').style.display = 'block';
     } catch (error) {
         alert(error.message);
-        loadingSpinner.style.display = 'none';
     }
 }
 
-function readRow(row) {
+function readReceiver(receiver) {
     return {
-        name: rowField(row, 'name').value.trim(),
-        position: parseCoords(rowField(row, 'position').value),
-        ...parseBearing(rowField(row, 'bearing').value)
+        name: receiverName(receiver),
+        position: parseCoords(receiver.position),
+        ...parseBearing(receiver.bearing)
     };
 }
 
@@ -243,15 +351,14 @@ function formatBearing(d) {
 function drawVectors() {
     vectorLayer.clearLayers();
 
-    const rows = Array.from(document.querySelectorAll('#input-rows tr'));
     const lines = [];
 
-    rows.forEach((row, index) => {
-        if (!isRowEnabled(row)) return;
-        const d = readRow(row);
+    receivers.forEach(receiver => {
+        if (!receiver.enabled) return;
+        const d = readReceiver(receiver);
         if (!d.position) return;
 
-        const lineColor = `hsl(${(index * 360) / rows.length}, 100%, 50%)`;
+        const lineColor = receiverColor(receiver);
         const hasBearing = isValidBearing(d.bearing);
 
         if (hasBearing) {
@@ -286,14 +393,13 @@ function drawVectors() {
             });
         }
 
-        const rxName = d.name || `RX ${index + 1}`;
         L.marker(d.position, {
-                icon: rxIcon(rxName, lineColor),
-                exportAs: { kind: 'rx', name: rxName, color: lineColor }
+                icon: rxIcon(d.name, lineColor),
+                exportAs: { kind: 'rx', name: d.name, color: lineColor }
             })
             .addTo(vectorLayer)
             .bindPopup(`
-            <b>${escapeHtml(d.name || `Signal Source ${index + 1}`)}</b><br>
+            <b>${escapeHtml(d.name)}</b><br>
             Bearing: ${hasBearing ? formatBearing(d) : '—'}
         `);
     });
@@ -311,7 +417,7 @@ function clearTarget() {
     targetLocation = null;
     triangulatedGeometry = null;
     document.getElementById('result-coords').textContent = 'Coordinates: Awaiting triangulation...';
-    document.getElementById('confidence-level').style.display = 'none';
+    document.getElementById('target-details').hidden = true;
     renderPoiList();
     saveState();
 }
@@ -353,10 +459,11 @@ function calculateIntersection(data, { silent = false } = {}) {
         map.fitBounds(bounds.pad(0.3));
 
         updateConfidenceLevel(lines, intersection);
+        document.getElementById('target-details').hidden = false;
     } else {
         if (!silent) alert(`No intersection found. Check that the bearings converge and are not parallel.`);
         document.getElementById('result-coords').textContent = 'Coordinates: No valid intersection found';
-        document.getElementById('confidence-level').style.display = 'none';
+        document.getElementById('target-details').hidden = true;
 
         // If no intersection, just fit to measurement points
         map.fitBounds(bounds.pad(0.3));
@@ -368,11 +475,17 @@ function calculateIntersection(data, { silent = false } = {}) {
 const MAX_LINE_LENGTH = 20000; // km
 
 // Points along the great circle from start on the given bearing, with
-// longitudes unwrapped so Leaflet draws it as one continuous line
-function greatCirclePath(start, bearing, distance, stepKm = 100) {
-    const steps = Math.max(1, Math.ceil(distance / stepKm));
-    const points = Array.from({ length: steps + 1 }, (_, i) =>
-        destinationPoint(start, bearing, (distance * i) / steps));
+// longitudes unwrapped so Leaflet draws it as one continuous line.
+// Leaflet joins the points with straight lines on the Mercator map, but a great circle
+// curves there, so long steps would make the drawn line miss the computed target.
+// Steps grow with distance (2% of it), keeping the drawn line within a metre of the true
+// bearing near the receivers, where fixes are made.
+function greatCirclePath(start, bearing, distance) {
+    const points = [destinationPoint(start, bearing, 0)];
+    for (let d = 0; d < distance;) {
+        d = Math.min(distance, d + Math.min(100, Math.max(0.05, d * 0.02)));
+        points.push(destinationPoint(start, bearing, d));
+    }
     return unwrapLongitudes(points);
 }
 
@@ -554,23 +667,13 @@ function calculateDistance(point1, point2) {
     return R * c;
 }
 
-// Reset the form, rows, and map
-function resetData() {
-    document.getElementById('input-rows').innerHTML = '';
-    rowCount = 0;
-    document.getElementById('report-time').value = '';
-    document.getElementById('report-sign').value = '';
-    document.getElementById('report-freq').value = '';
-
-    clearTarget();
-
-    // Reset to Bucharest view instead of world view
-    map.setView(START_COORDS, START_ZOOM);
-    document.getElementById('result-coords').textContent = 'Coordinates: Awaiting triangulation...';
-    document.getElementById('confidence-level').style.display = 'none';
-
-    // Add initial row (also saves the cleared state)
-    addRow();
+// Save the triangulated target as a transmitter POI
+function addTargetAsTransmitter() {
+    if (!targetLocation) return;
+    const sign = document.getElementById('report-sign').value.trim();
+    const name = prompt('Transmitter name:', sign || `TX ${poiCount + 1}`);
+    if (name === null) return;
+    addPoi([...targetLocation], name.trim(), 'transmitter');
 }
 
 // Render the map with its lines and markers onto a canvas. The tiles already on screen
@@ -662,7 +765,7 @@ async function renderMapCanvas() {
             const p = map.latLngToContainerPoint(o.position);
             if (!inFrame(p)) return;
             if (o.kind === 'rx') drawRxOnCanvas(ctx, p, o.name, o.color);
-            else if (o.kind === 'poi') drawPoiOnCanvas(ctx, p, o.name);
+            else if (o.kind === 'poi') drawPoiOnCanvas(ctx, p, o.name, o.type);
             else drawTargetOnCanvas(ctx, p);
         });
 
@@ -671,6 +774,29 @@ async function renderMapCanvas() {
 
 function canvasToPng(canvas) {
     return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.download = filename;
+    link.href = url;
+    link.click();
+    URL.revokeObjectURL(url);
+}
+
+function mapImageFilename() {
+    return `triangulation-map-${new Date().toISOString().slice(0,10)}.png`;
+}
+
+// Download the map as a PNG
+async function saveMapImage(png = renderMapCanvas().then(canvasToPng)) {
+    try {
+        downloadBlob(await png, mapImageFilename());
+    } catch (error) {
+        console.error('Error rendering map:', error);
+        alert('Failed to render the map image. Please try again.');
+    }
 }
 
 // Copy the map as an image; falls back to downloading it if the clipboard is blocked
@@ -683,17 +809,7 @@ async function copyMapImage() {
         flashButton(button, ' Copied! ');
     } catch (error) {
         console.warn('Could not copy map, downloading instead:', error);
-        try {
-            const url = URL.createObjectURL(await png);
-            const link = document.createElement('a');
-            link.download = `triangulation-map-${new Date().toISOString().slice(0,10)}.png`;
-            link.href = url;
-            link.click();
-            URL.revokeObjectURL(url);
-        } catch (renderError) {
-            console.error('Error rendering map:', renderError);
-            alert('Failed to render the map image. Please try again.');
-        }
+        await saveMapImage(png);
     }
 }
 
@@ -752,20 +868,11 @@ function drawRxOnCanvas(ctx, p, name, color) {
     drawLabelOnCanvas(ctx, name, p.x + 14, p.y - 18, color);
 }
 
-function drawPoiOnCanvas(ctx, { x, y }, name) {
-    ctx.save();
-    ctx.shadowColor = 'rgba(190, 75, 219, 0.8)';
-    ctx.shadowBlur = 6;
-    ctx.beginPath();
-    ctx.arc(x, y, 6, 0, 2 * Math.PI);
-    ctx.fillStyle = '#be4bdb';
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#ffffff';
-    ctx.stroke();
-    ctx.restore();
-    drawLabelOnCanvas(ctx, name, x, y - 20, '#be4bdb', 'center');
+// Matches poiIcon on the map: symbol by type, label centred above it
+function drawPoiOnCanvas(ctx, p, name, typeKey) {
+    const type = POI_TYPES[typeKey] || POI_TYPES.poi;
+    drawIconOnCanvas(ctx, type.icon, p, type.color);
+    drawLabelOnCanvas(ctx, name, p.x, p.y - type.icon.anchor[1] - 12, type.color, 'center');
 }
 
 function drawTargetOnCanvas(ctx, p) {
@@ -784,13 +891,12 @@ function currentTimeRounded() {
 async function copyReport() {
     let txtContent = '';
     try {
-        // Disabled receivers are left out; default names keep their table numbering
-        const sources = Array.from(document.querySelectorAll('#input-rows tr')).map((row, index) => ({
-            enabled: isRowEnabled(row),
-            name: rowField(row, 'name').value.trim() || `RX ${index + 1}`,
-            position: rowField(row, 'position').value.trim(),
-            bearing: rowField(row, 'bearing').value.trim()
-        })).filter(s => s.enabled);
+        // Only receivers that got the signal; default names keep their list numbering
+        const sources = receivers.filter(r => r.enabled).map(r => ({
+            name: receiverName(r),
+            position: r.position.trim(),
+            bearing: r.bearing.trim()
+        }));
 
         txtContent = `Meldung: ${new Date().toLocaleDateString('de-CH')}\n`;
         txtContent += `Stao: ${sources.map(s => `${s.name} ${s.position}`.trim()).join(' / ')}\n`;
@@ -856,28 +962,45 @@ function setMapTool(tool) {
         '';
 }
 
+function poiType(poi) {
+    return POI_TYPES[poi.type] || POI_TYPES.poi;
+}
+
+function poiIcon(poi) {
+    const type = poiType(poi);
+    return L.divIcon({
+        className: 'poi-marker',
+        html: `${iconSvg(type.icon, type.color)}<span class="map-label" style="color: ${type.color};">${escapeHtml(poi.name)}</span>`,
+        iconSize: type.icon.size,
+        iconAnchor: type.icon.anchor
+    });
+}
+
+// Redraw a POI's marker after its name or type changed
+function updatePoiMarker(poi) {
+    poi.marker.options.exportAs = { kind: 'poi', name: poi.name, type: poi.type };
+    poi.marker.setIcon(poiIcon(poi));
+}
+
+function poiTypeSelect(selected, select = document.createElement('select')) {
+    Object.entries(POI_TYPES).forEach(([value, type]) => select.add(new Option(type.label, value)));
+    select.value = selected;
+    return select;
+}
+
 // Add a point of interest
-function addPoi(position, name) {
+function addPoi(position, name, type = 'poi') {
     poiCount++;
+    type = type in POI_TYPES ? type : 'poi';
     const poi = {
         id: poiCount,
-        name: name || `POI ${poiCount}`,
+        name: name || `${POI_TYPES[type].label} ${poiCount}`,
+        type,
         position
     };
 
-    poi.marker = L.marker(position, {
-            icon: L.divIcon({
-                className: 'poi-marker',
-                html: '<div class="poi-pin"></div>',
-                iconSize: [14, 14]
-            }),
-            exportAs: { kind: 'poi', name: poi.name }
-        })
-        .addTo(poiLayer)
-        .bindTooltip(escapeHtml(poi.name), {
-            direction: 'top',
-            offset: [0, -8]
-        });
+    poi.marker = L.marker(position, { icon: poiIcon(poi) }).addTo(poiLayer);
+    updatePoiMarker(poi);
 
     pois.push(poi);
     renderPoiList();
@@ -917,18 +1040,24 @@ function addPoiFromForm() {
     }
 
     const [lat, lng] = coords;
-    addPoi([lat, lng], nameInput.value.trim());
+    addPoi([lat, lng], nameInput.value.trim(), document.getElementById('poi-type').value);
     nameInput.value = '';
     coordsInput.value = '';
     map.panTo([lat, lng]);
 }
 
-// Rebuild the POI table and marker popups (distances depend on the current target)
+// Commit text inputs that apply on change when Enter is pressed
+function blurOnEnter(input) {
+    input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') input.blur();
+    });
+}
+
+// Rebuild the POI list and marker popups (distances depend on the current target)
 function renderPoiList() {
-    const tbody = document.getElementById('poi-rows');
-    tbody.innerHTML = '';
-    document.getElementById('poi-table').style.display = pois.length ? '' : 'none';
-    document.getElementById('poi-empty').style.display = pois.length ? 'none' : '';
+    const list = document.getElementById('poi-list');
+    list.innerHTML = '';
+    document.getElementById('poi-empty').hidden = pois.length > 0;
 
     pois.forEach(poi => {
         let distanceText = 'No target';
@@ -939,33 +1068,47 @@ function renderPoiList() {
         }
 
         poi.marker.bindPopup(`
-            <b>${escapeHtml(poi.name)}</b><br>
+            <b>${escapeHtml(poi.name)}</b> (${poiType(poi).label})<br>
             ${formatCoords(poi.position)}<br>
             Distance to Target: ${distanceText}
         `);
 
-        const row = document.createElement('tr');
-        const nameCell = document.createElement('td');
-        const nameLink = document.createElement('a');
-        nameLink.href = '#';
-        nameLink.className = 'poi-link';
-        nameLink.textContent = poi.name;
-        nameLink.addEventListener('click', e => {
-            e.preventDefault();
+        const item = document.createElement('div');
+        item.className = 'poi-item';
+
+        const locate = document.createElement('button');
+        locate.type = 'button';
+        locate.className = 'poi-locate';
+        locate.title = 'Show on map';
+        locate.innerHTML = iconSvg(poiType(poi).icon, poiType(poi).color);
+        locate.addEventListener('click', () => {
             map.setView(poi.position, Math.max(map.getZoom(), 14));
             poi.marker.openPopup();
         });
-        nameCell.appendChild(nameLink);
 
-        // Coordinates are editable in place
-        const coordsCell = document.createElement('td');
-        const coordsInput = document.createElement('input');
-        coordsInput.type = 'text';
-        coordsInput.value = formatCoords(poi.position);
-        coordsInput.title = 'Edit and press Enter to move this POI';
-        coordsInput.addEventListener('keydown', e => {
-            if (e.key === 'Enter') coordsInput.blur();
+        // Name, type and coordinates are editable in place
+        const nameInput = textInput(poi.name, 'Name');
+        nameInput.title = 'Edit and press Enter to rename this POI';
+        blurOnEnter(nameInput);
+        nameInput.addEventListener('change', () => {
+            poi.name = nameInput.value.trim() || poi.name;
+            updatePoiMarker(poi);
+            renderPoiList();
+            saveState();
         });
+
+        const typeSelect = poiTypeSelect(poi.type);
+        typeSelect.title = 'Symbol type';
+        typeSelect.addEventListener('change', () => {
+            poi.type = typeSelect.value;
+            updatePoiMarker(poi);
+            renderPoiList();
+            saveState();
+        });
+
+        const coordsInput = textInput(formatCoords(poi.position), 'Lat,Lng');
+        coordsInput.title = 'Edit and press Enter to move this POI';
+        blurOnEnter(coordsInput);
         coordsInput.addEventListener('change', () => {
             const coords = parseCoords(coordsInput.value);
             if (!coords) {
@@ -978,22 +1121,20 @@ function renderPoiList() {
             renderPoiList();
             saveState();
         });
-        coordsCell.appendChild(coordsInput);
+        const distance = document.createElement('span');
+        distance.className = 'poi-distance mono';
+        distance.textContent = distanceText;
+        distance.title = 'Distance and bearing from the target';
 
-        const distanceCell = document.createElement('td');
-        distanceCell.className = 'mono';
-        distanceCell.textContent = distanceText;
-
-        const actionCell = document.createElement('td');
         const removeButton = document.createElement('button');
         removeButton.type = 'button';
-        removeButton.className = 'danger';
-        removeButton.textContent = 'Remove';
+        removeButton.className = 'icon-button danger-hover';
+        removeButton.title = 'Remove POI';
+        removeButton.textContent = '✕';
         removeButton.addEventListener('click', () => removePoi(poi.id));
-        actionCell.appendChild(removeButton);
 
-        row.append(nameCell, coordsCell, distanceCell, actionCell);
-        tbody.appendChild(row);
+        item.append(locate, nameInput, typeSelect, removeButton, coordsInput, distance);
+        list.appendChild(item);
     });
 }
 
@@ -1082,9 +1223,12 @@ function clearMeasurements() {
 
 map.on('click', e => {
     if (activeTool === 'poi') {
-        const name = prompt('POI name:', `POI ${poiCount + 1}`);
+        // Uses the type picked in the POI form
+        const type = document.getElementById('poi-type').value;
+        const label = POI_TYPES[type].label;
+        const name = prompt(`${label} name:`, `${label} ${poiCount + 1}`);
         if (name === null) return;
-        addPoi([e.latlng.lat, e.latlng.lng], name.trim());
+        addPoi([e.latlng.lat, e.latlng.lng], name.trim(), type);
     } else if (activeTool === 'measure') {
         addMeasurePoint(e.latlng);
     }
@@ -1106,17 +1250,12 @@ const STORAGE_KEY = 'sigint-triangulation-state';
 
 function buildState() {
     return {
-        rows: Array.from(document.querySelectorAll('#input-rows tr')).map(row => ({
-            enabled: isRowEnabled(row),
-            name: rowField(row, 'name').value,
-            position: rowField(row, 'position').value,
-            bearing: rowField(row, 'bearing').value
-        })),
+        rows: receivers.map(({ enabled, name, position, bearing }) => ({ enabled, name, position, bearing })),
         reportTime: document.getElementById('report-time').value,
         reportSign: document.getElementById('report-sign').value,
         reportFreq: document.getElementById('report-freq').value,
         triangulated: targetLocation !== null,
-        pois: pois.map(poi => ({ name: poi.name, position: poi.position })),
+        pois: pois.map(poi => ({ name: poi.name, type: poi.type, position: poi.position })),
         measurements: measurements.filter(points => points.length >= 2),
         baseLayer: activeBaseLayer,
         view: {
@@ -1150,8 +1289,8 @@ function applyState(state) {
         document.getElementById('report-time').value = state.reportTime || '';
         document.getElementById('report-sign').value = state.reportSign || '';
         document.getElementById('report-freq').value = state.reportFreq || '';
-        (state.rows && state.rows.length ? state.rows : [{}]).forEach(values => addRow(values));
-        (state.pois || []).forEach(poi => addPoi(poi.position, poi.name));
+        (state.rows || []).forEach(values => addReceiver(values));
+        (state.pois || []).forEach(poi => addPoi(poi.position, poi.name, poi.type));
 
         (state.measurements || []).forEach(points => {
             points.forEach(([lat, lng]) => addMeasurePoint(L.latLng(lat, lng)));
@@ -1159,13 +1298,11 @@ function applyState(state) {
         });
         document.getElementById('map-tool-hint').textContent = '';
 
-        // Re-run the triangulation from the saved rows
+        // Re-run the triangulation from the saved receivers
         if (state.triangulated) {
-            const rows = Array.from(document.querySelectorAll('#input-rows tr')).filter(isRowEnabled);
-            const data = rows.map(readRow);
+            const data = receivers.filter(r => r.enabled).map(readReceiver);
             if (data.length >= 2 && data.every(d => d.position && isValidBearing(d.bearing))) {
                 calculateIntersection(data, { silent: true });
-                if (targetLocation) document.getElementById('confidence-level').style.display = 'block';
             }
         }
 
@@ -1221,14 +1358,16 @@ async function importPreset(file) {
         alert('This file is not a SIGINT triangulation preset.');
         return;
     }
-    if (!confirm('Importing replaces the current signal sources, POIs and measurements. Continue?')) return;
+    if (!confirm('Importing replaces the current receivers, POIs and measurements. Continue?')) return;
 
     // Clear the current session without saving the intermediate empty state
     setMapTool(null);
     restoring = true;
     try {
-        document.getElementById('input-rows').innerHTML = '';
-        rowCount = 0;
+        receivers = [];
+        receiverCount = 0;
+        renderReceivers();
+        drawVectors();
         clearTarget();
         poiLayer.clearLayers();
         pois = [];
@@ -1258,18 +1397,19 @@ function promptApiKey() {
 
 // Add event listeners
 document.getElementById('set-api-key').addEventListener('click', promptApiKey);
-document.getElementById('add-row').addEventListener('click', () => addRow());
-document.getElementById('input-rows').addEventListener('input', () => {
-    drawVectors();
-    saveState();
+document.getElementById('add-receiver').addEventListener('click', () => {
+    addReceiver();
+    document.querySelector('#receiver-list .receiver-item:last-child input').focus();
 });
+document.getElementById('new-signal').addEventListener('click', newSignal);
+document.getElementById('add-target-poi').addEventListener('click', addTargetAsTransmitter);
 document.getElementById('report-time').addEventListener('input', saveState);
 document.getElementById('report-sign').addEventListener('input', saveState);
 document.getElementById('report-freq').addEventListener('input', saveState);
 map.on('moveend', saveState);
 document.getElementById('process-data').addEventListener('click', processData);
-document.getElementById('reset-data').addEventListener('click', resetData);
 document.getElementById('copy-map').addEventListener('click', copyMapImage);
+document.getElementById('save-image').addEventListener('click', () => saveMapImage());
 document.getElementById('copy-report').addEventListener('click', copyReport);
 document.getElementById('export-preset').addEventListener('click', exportPreset);
 document.getElementById('import-preset').addEventListener('click', () => document.getElementById('preset-file').click());
@@ -1288,8 +1428,11 @@ document.getElementById('add-poi').addEventListener('click', addPoiFromForm);
     });
 });
 
-// Restore the previous session, or start with one empty row
+poiTypeSelect('poi', document.getElementById('poi-type'));
+
+// Restore the previous session, or start with two empty receivers
 if (!loadState()) {
-    addRow();
+    addReceiver();
+    addReceiver();
     renderPoiList();
 }

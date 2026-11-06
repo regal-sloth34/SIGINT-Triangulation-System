@@ -14,85 +14,81 @@
     <link rel="manifest" href="site-data/site.webmanifest">
   </head>
   <body>
-    <div class="container">
+    <header class="app-header">
       <h1>SIGINT Triangulation System</h1>
-      <div class="control-panel">
+      <div class="toolbar">
         <div class="control-group">
-          <button type="button" id="process-data">
-            <span class="loading" id="process-loading"></span> Triangulate </button>
-          <button type="button" id="add-row" class="secondary"> + Add Source </button>
-          <button type="button" id="reset-data" class="secondary danger-hover"> Clear </button>
-        </div>
-        <div class="control-group">
-          <button type="button" id="copy-map" class="secondary"> Copy Map </button>
           <button type="button" id="copy-report" class="secondary"> Copy Report </button>
+          <button type="button" id="copy-map" class="secondary"> Copy Map </button>
+          <button type="button" id="save-image" class="secondary"> Save Image </button>
         </div>
         <div class="control-group">
           <button type="button" id="import-preset" class="secondary"> Import Preset </button>
           <button type="button" id="export-preset" class="secondary"> Export Preset </button>
           <input type="file" id="preset-file" accept=".json,application/json" hidden>
         </div>
-        <div class="control-group control-group-end">
+        <div class="control-group">
           <button type="button" id="set-api-key" class="secondary"> API Key </button>
         </div>
       </div>
-      <form id="input-form">
-        <div class="report-fields">
-          <input type="text" id="report-time" placeholder="Zeit (default: now)">
-          <input type="text" id="report-sign" placeholder="Signal">
-          <input type="number" id="report-freq" step="0.001" placeholder="Freq (MHz)">
+    </header>
+    <main class="layout">
+      <aside class="sidebar">
+        <section class="panel" id="signal-panel">
+          <div class="panel-header">
+            <h2>Signal</h2>
+            <button type="button" id="new-signal" class="secondary small" title="Keep the receivers, clear bearings and report fields"> New Signal </button>
+          </div>
+          <div class="report-fields">
+            <input type="text" id="report-time" placeholder="Zeit (now)">
+            <input type="text" id="report-sign" placeholder="Signal">
+            <input type="number" id="report-freq" step="0.001" placeholder="Freq (MHz)">
+          </div>
+          <p class="panel-hint">Tick the receivers that got the signal and enter their bearing (° or range).</p>
+          <div id="bearing-list"></div>
+          <p class="empty" id="bearing-empty">No receivers yet. Add them under Receivers below.</p>
+          <button type="button" id="process-data" class="wide"> Triangulate </button>
+        </section>
+        <section class="panel" id="output">
+          <h2>Target Location</h2>
+          <p id="result-coords">Coordinates: Awaiting triangulation...</p>
+          <div id="target-details" hidden>
+            <div id="confidence-level"> Confidence Level: <span id="confidence-value">High</span></div>
+            <button type="button" id="add-target-poi" class="secondary small"> Save as Transmitter </button>
+          </div>
+        </section>
+        <section class="panel" id="receiver-panel">
+          <div class="panel-header">
+            <h2>Receivers</h2>
+            <button type="button" id="add-receiver" class="secondary small"> + Add Receiver </button>
+          </div>
+          <div id="receiver-list"></div>
+          <p class="empty" id="receiver-empty">No receivers. Add your stations once; they are kept between signals.</p>
+        </section>
+        <section class="panel" id="poi-panel">
+          <h2>Points of Interest</h2>
+          <div class="poi-form">
+            <input type="text" id="poi-name" placeholder="Name">
+            <select id="poi-type" title="Symbol type"></select>
+            <input type="text" id="poi-coords" placeholder="Lat,Lng">
+            <button type="button" id="add-poi" class="small"> Add </button>
+          </div>
+          <div id="poi-list"></div>
+          <p class="empty" id="poi-empty">No points of interest. Use "Add POI" on the map, or enter coordinates above.</p>
+        </section>
+      </aside>
+      <section class="map-area">
+        <div class="map-tools">
+          <button type="button" id="poi-mode" class="secondary small"> Add POI </button>
+          <button type="button" id="measure-mode" class="secondary small"> Measure Distance </button>
+          <button type="button" id="clear-measure" class="secondary small"> Clear Measurements </button>
+          <span id="map-tool-hint"></span>
         </div>
-        <table>
-          <thead>
-            <tr>
-              <th>On</th>
-              <th>Name</th>
-              <th>Signal Source Location</th>
-              <th>Bearing (° or range)</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="input-rows">
-            <!-- Rows will be dynamically added here -->
-          </tbody>
-        </table>
-      </form>
-      <div class="map-tools">
-        <button type="button" id="poi-mode" class="secondary"> Add POI </button>
-        <button type="button" id="measure-mode" class="secondary"> Measure Distance </button>
-        <button type="button" id="clear-measure" class="secondary"> Clear Measurements </button>
-        <span id="map-tool-hint"></span>
-      </div>
-      <div id="map-container">
-        <div id="map"></div>
-      </div>
-      <div id="output">
-        <h2>Target Location</h2>
-        <p id="result-coords">Coordinates: Awaiting triangulation...</p>
-        <div id="confidence-level" style="display: none;"> Confidence Level: <span id="confidence-value">High</span>
+        <div id="map-container">
+          <div id="map"></div>
         </div>
-      </div>
-      <div id="poi-panel">
-        <h2>Points of Interest</h2>
-        <div class="poi-form">
-          <input type="text" id="poi-name" placeholder="Name">
-          <input type="text" id="poi-coords" placeholder="Lat,Lng (e.g. 44.4268,26.1025)">
-          <button type="button" id="add-poi"> Add POI </button>
-        </div>
-        <table id="poi-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Coordinates</th>
-              <th>Distance to Target</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="poi-rows"></tbody>
-        </table>
-        <p id="poi-empty">No points of interest. Use "Add POI" and click the map, or enter coordinates above.</p>
-      </div>
-    </div>
+      </section>
+    </main>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="script.js"></script>
   </body>
