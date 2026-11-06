@@ -44,13 +44,13 @@ The **SIGINT Triangulation System** is a web-based application designed to simul
 
 ## Usage
 
-1. **Set Up Receivers**: Under "Receivers", add your stations once with a name and location (e.g., `44.4268,26.1025`). They are kept between signals.
+1. **Set Up Receivers**: Under "Receivers" (a collapsible panel), add your stations once with a name and location (e.g., `44.4268,26.1025`). They are kept between signals.
 2. **Enter a Signal**: In the "Signal" panel, tick the receivers that received it and enter their bearing in degrees (0–360°, or a range like `40-55`). Typing a bearing ticks the receiver automatically.
-3. **Triangulate Position**: Click "Triangulate" to calculate the target location.
-4. **View Results**: See the triangulated coordinates and confidence level on the map and in the results section. "Save as Transmitter" stores the target as a POI.
-5. **Points of Interest**: Add POIs on the map or by coordinates. Their name, type (POI or Transmitter, each with its own symbol) and coordinates can be edited in the list.
+3. **Triangulate Position**: Click "Triangulate". The result is added as a POI of type Target, named after the signal. Triangulating again moves that target; after "New Signal" the next triangulation adds a new one, so several targets can be shown at once.
+4. **Points of Interest**: Add POIs on the map or by coordinates. Their name, type (Target, Transmitter or POI, each with its own symbol) and coordinates can be edited in the list, including triangulated targets.
+5. **Distances**: Pick two POIs under "Distance", or use "POI Distance" on the map and click two POIs. "Measure Distance" measures freely and snaps to POIs you click.
 6. **Export Data**: Use "Copy Map" to copy the map as an image, "Save Image" to download it as a PNG, and "Copy Report" to copy the report text (Meldung, Stao, Zeit, Sign, Freq, AZ).
-7. **Next Signal**: "New Signal" clears the bearings and report fields but keeps the receivers.
+7. **Next Signal**: "New Signal" clears the bearings and report fields but keeps the receivers and earlier targets. "Clear All" removes everything.
 
 ## How It Works
 

@@ -29,6 +29,7 @@
         </div>
         <div class="control-group">
           <button type="button" id="set-api-key" class="secondary"> API Key </button>
+          <button type="button" id="clear-all" class="secondary danger-hover"> Clear All </button>
         </div>
       </div>
     </header>
@@ -46,7 +47,7 @@
           </div>
           <p class="panel-hint">Tick the receivers that got the signal and enter their bearing (° or range).</p>
           <div id="bearing-list"></div>
-          <p class="empty" id="bearing-empty">No receivers yet. Add them under Receivers below.</p>
+          <p class="empty" id="bearing-empty">No receivers yet. <button type="button" id="open-receivers" class="link-button">Add a receiver</button></p>
           <button type="button" id="process-data" class="wide"> Triangulate </button>
         </section>
         <section class="panel" id="output">
@@ -54,17 +55,18 @@
           <p id="result-coords">Coordinates: Awaiting triangulation...</p>
           <div id="target-details" hidden>
             <div id="confidence-level"> Confidence Level: <span id="confidence-value">High</span></div>
-            <button type="button" id="add-target-poi" class="secondary small"> Save as Transmitter </button>
+            <p class="panel-hint" id="target-stale" hidden>Bearings changed. Triangulate again to update this target.</p>
+            <p class="panel-hint">The target is a POI: rename, move or change its symbol under Points of Interest.</p>
           </div>
         </section>
-        <section class="panel" id="receiver-panel">
-          <div class="panel-header">
-            <h2>Receivers</h2>
-            <button type="button" id="add-receiver" class="secondary small"> + Add Receiver </button>
-          </div>
+        <details class="panel" id="receiver-panel">
+          <summary>
+            <h2>Receivers <span class="count" id="receiver-count">0</span></h2>
+          </summary>
           <div id="receiver-list"></div>
           <p class="empty" id="receiver-empty">No receivers. Add your stations once; they are kept between signals.</p>
-        </section>
+          <button type="button" id="add-receiver" class="secondary small"> + Add Receiver </button>
+        </details>
         <section class="panel" id="poi-panel">
           <h2>Points of Interest</h2>
           <div class="poi-form">
@@ -74,6 +76,13 @@
             <button type="button" id="add-poi" class="small"> Add </button>
           </div>
           <div id="poi-list"></div>
+          <div class="distance-tool" id="distance-tool" hidden>
+            <h3>Distance</h3>
+            <select id="distance-from" title="From"></select>
+            <span>→</span>
+            <select id="distance-to" title="To"></select>
+            <span class="mono" id="distance-result"></span>
+          </div>
           <p class="empty" id="poi-empty">No points of interest. Use "Add POI" on the map, or enter coordinates above.</p>
         </section>
       </aside>
@@ -81,6 +90,7 @@
         <div class="map-tools">
           <button type="button" id="poi-mode" class="secondary small"> Add POI </button>
           <button type="button" id="measure-mode" class="secondary small"> Measure Distance </button>
+          <button type="button" id="distance-mode" class="secondary small"> POI Distance </button>
           <button type="button" id="clear-measure" class="secondary small"> Clear Measurements </button>
           <span id="map-tool-hint"></span>
         </div>

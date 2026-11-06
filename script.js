@@ -23,12 +23,11 @@ const darkMap = L.tileLayer(cartoUrl(), {
     crossOrigin: true // lets the loaded tiles be drawn onto the image export canvas
 });
 
-// Initialize map centered on Bucharest, Romania
-const START_COORDS = [46.84061,6.91782]; // Coordinates for Bucharest
+// Initial map view, in Switzerland where the swisstopo maps are available
+const START_COORDS = [46.84061,6.91782];
 const START_ZOOM = 12; // Appropriate zoom level for city view
 
 const map = L.map('map', {
-    layers: [darkMap],
     center: START_COORDS,
     zoom: START_ZOOM
 });
@@ -44,13 +43,14 @@ function swisstopoLayer(layerId, maxNativeZoom) {
 }
 
 const baseLayers = {
-    
     'swisstopo Map': swisstopoLayer('ch.swisstopo.pixelkarte-farbe', 18),
     'swisstopo Map (grey)': swisstopoLayer('ch.swisstopo.pixelkarte-grau', 18),
     'swisstopo Aerial': swisstopoLayer('ch.swisstopo.swissimage', 19),
     'CARTO': darkMap
 };
-let activeBaseLayer = 'swisstopo Map';
+const DEFAULT_BASE_LAYER = 'swisstopo Map (grey)';
+let activeBaseLayer = DEFAULT_BASE_LAYER;
+baseLayers[activeBaseLayer].addTo(map);
 
 L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
 map.on('baselayerchange', e => {
@@ -60,15 +60,18 @@ map.on('baselayerchange', e => {
 
 // Separate layer groups so POIs and measurements survive re-triangulation
 const vectorLayer = L.layerGroup().addTo(map); // receivers and bearing lines, drawn live
-const resultsLayer = L.layerGroup().addTo(map); // triangulated target
+const distanceLayer = L.layerGroup().addTo(map); // line between the two POIs picked in the distance tool
 const poiLayer = L.layerGroup().addTo(map);
 const measureLayer = L.layerGroup().addTo(map);
 
-let targetLocation = null;
+// Triangulation results are POIs of type 'target'. The current target belongs to the
+// signal being entered: triangulating again moves it, a new signal starts a new one.
+let currentTarget = null;
 let triangulatedGeometry = null; // vectors the current target was computed from
+let targetStale = false; // bearings changed since the current target was computed
 let pois = [];
 let poiCount = 0;
-let activeTool = null; // 'poi' | 'measure' | null
+let activeTool = null; // 'poi' | 'measure' | 'distance' | null
 let currentMeasure = null;
 let measurements = []; // point arrays, one per measurement path
 let restoring = false; // suppresses saving while restoring saved state
@@ -82,7 +85,7 @@ const RX_WAVES = 'M17.54 5.46 A5 5 0 0 1 17.54 12.54 M10.46 5.46 A5 5 0 0 0 10.4
     'M20.36 2.64 A9 9 0 0 1 20.36 15.36 M7.64 2.64 A9 9 0 0 0 7.64 15.36';
 const RX_ICON = {
     size: [28, 36],
-    anchor: [14, 34], // foot of the mast
+    anchor: [14, 33], // centre of the mast's base line
     parts: [
         { d: RX_TOWER + ' ' + RX_WAVES, stroke: OUTLINE, width: 4.5 },
         { d: RX_TOWER + ' ' + RX_WAVES, stroke: 'color', width: 2 },
@@ -125,8 +128,9 @@ const TX_ICON = {
 };
 
 const POI_TYPES = {
-    poi: { label: 'POI', icon: POI_ICON, color: '#be4bdb' },
-    transmitter: { label: 'Transmitter', icon: TX_ICON, color: '#ff922b' }
+    target: { label: 'Target', icon: TARGET_ICON, color: '#ff3b3b', pulse: true },
+    transmitter: { label: 'Transmitter', icon: TX_ICON, color: '#ff922b' },
+    poi: { label: 'POI', icon: POI_ICON, color: '#be4bdb' }
 };
 
 function iconSvg(icon, color) {
@@ -139,22 +143,217 @@ function iconSvg(icon, color) {
     return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${paths}</svg>`;
 }
 
-function rxIcon(name, color) {
+function rxIcon(color) {
     return L.divIcon({
         className: 'rx-marker',
-        html: `${iconSvg(RX_ICON, color)}<span class="map-label" style="color: ${color}; border-color: ${color};">${escapeHtml(name)}</span>`,
+        html: iconSvg(RX_ICON, color),
         iconSize: RX_ICON.size,
         iconAnchor: RX_ICON.anchor
     });
 }
 
-// Custom icon for intersection point
-const targetIcon = L.divIcon({
-    className: 'custom-target-marker',
-    html: `<div class="target-pulse">${iconSvg(TARGET_ICON, '#ff3b3b')}</div><span class="map-label target-label">TARGET</span>`,
-    iconSize: TARGET_ICON.size,
-    iconAnchor: TARGET_ICON.anchor
-});
+// Map labels: names of receivers and POIs, and distances on measurement lines.
+// All labels are laid out together so they avoid each other and the icons; the image
+// export draws the same layout.
+const LABEL_FONT = '600 12px "Roboto Mono", monospace';
+const LABEL_HEIGHT = 20;
+const LABEL_GAP = 3; // between a label and its icon
+const labelMeasureCtx = document.createElement('canvas').getContext('2d');
+
+const labelPane = map.createPane('labels');
+labelPane.style.zIndex = 650; // above markers, below popups
+labelPane.style.pointerEvents = 'none';
+
+function labelWidth(text) {
+    labelMeasureCtx.font = LABEL_FONT;
+    return Math.ceil(labelMeasureCtx.measureText(text).width) + 14; // padding and border
+}
+
+function labelStyle(label) {
+    return label.line ?
+        { background: '#fcc419', border: OUTLINE, text: '#0f1117' } :
+        { background: 'rgba(15, 17, 23, 0.85)', border: label.color, text: label.color };
+}
+
+function markerIconSpec(exportAs) {
+    return exportAs.kind === 'rx' ? RX_ICON : (POI_TYPES[exportAs.type] || POI_TYPES.poi).icon;
+}
+
+function markerColor(exportAs) {
+    return exportAs.kind === 'rx' ? exportAs.color : (POI_TYPES[exportAs.type] || POI_TYPES.poi).color;
+}
+
+function boxOverlap(a, b) {
+    const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+    return w > 0 && h > 0 ? w * h : 0;
+}
+
+// Candidate boxes around a marker icon, nearest positions first
+function markerLabelCandidates(icon, w, h, preferRight) {
+    const g = LABEL_GAP;
+    const cx = icon.x + icon.w / 2;
+    const cy = icon.y + icon.h / 2;
+    const candidates = [];
+    for (let ring = 0; ring < 3; ring++) {
+        const d = ring * (h + 2);
+        const above = { x: cx - w / 2, y: icon.y - g - h - d };
+        const right = { x: icon.x + icon.w + g + d, y: cy - h / 2 };
+        const below = { x: cx - w / 2, y: icon.y + icon.h + g + d };
+        const left = { x: icon.x - g - w - d, y: cy - h / 2 };
+        const aboveRight = { x: icon.x + icon.w - 4 + d, y: icon.y - h + 4 - d };
+        const aboveLeft = { x: icon.x - w + 4 - d, y: icon.y - h + 4 - d };
+        const belowRight = { x: icon.x + icon.w - 4 + d, y: icon.y + icon.h - 4 + d };
+        const belowLeft = { x: icon.x - w + 4 - d, y: icon.y + icon.h - 4 + d };
+        candidates.push(...(preferRight ?
+            [right, aboveRight, belowRight, above, below, left, aboveLeft, belowLeft] :
+            [above, right, left, below, aboveRight, aboveLeft, belowRight, belowLeft]));
+    }
+    return candidates.map(c => ({ ...c, w, h }));
+}
+
+// Candidate boxes on a line: centred on its middle first, then moved along and off it
+function lineLabelCandidates(a, b, w, h) {
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const along = { x: (b.x - a.x) / len, y: (b.y - a.y) / len };
+    const normal = { x: -along.y, y: along.x };
+    const offsets = [[0, 0]];
+    for (let k = 1; k <= 3; k++) {
+        const s = k * (h + 4);
+        offsets.push([0, s], [0, -s], [k * len * 0.12, 0], [-k * len * 0.12, 0]);
+    }
+    return offsets.map(([t, n]) => ({
+        x: mid.x + along.x * t + normal.x * n - w / 2,
+        y: mid.y + along.y * t + normal.y * n - h / 2,
+        w,
+        h
+    }));
+}
+
+// Collect every label and place each on its first free candidate; returns boxes in
+// container pixels
+function computeLabelLayout() {
+    const size = map.getSize();
+    const view = { x: 0, y: 0, w: size.x, h: size.y };
+    const nearView = p => p.x > -200 && p.y > -200 && p.x < size.x + 200 && p.y < size.y + 200;
+    const labels = [];
+    const icons = [];
+
+    [vectorLayer, poiLayer].forEach(group => group.eachLayer(layer => {
+        const o = layer.options.exportAs;
+        if (!o) return;
+        const p = map.latLngToContainerPoint(layer.getLatLng());
+        if (!nearView(p)) return;
+        const spec = markerIconSpec(o);
+        const icon = { x: p.x - spec.anchor[0], y: p.y - spec.anchor[1], w: spec.size[0], h: spec.size[1] };
+        icons.push(icon);
+        const w = labelWidth(o.name);
+        labels.push({
+            text: o.name,
+            color: markerColor(o),
+            priority: o.type === 'target' ? 0 : o.type === 'transmitter' ? 2 : o.kind === 'rx' ? 3 : 4,
+            own: icon,
+            candidates: markerLabelCandidates(icon, w, LABEL_HEIGHT, o.kind === 'rx')
+        });
+    }));
+
+    // Distances sit in the middle of their line (ends in container pixels)
+    const lineLabel = (pa, pb, text, priority) => {
+        if (!nearView({ x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 })) return;
+        labels.push({ text, line: true, priority, candidates: lineLabelCandidates(pa, pb, labelWidth(text), LABEL_HEIGHT) });
+    };
+
+    const from = pois.find(p => p.id === distancePair.from);
+    const to = pois.find(p => p.id === distancePair.to);
+    if (from && to && from !== to) {
+        const km = calculateDistance(from.position, to.position);
+        // The line is a great circle; label its true middle
+        const mid = destinationPoint(from.position, calculateBearing(from.position, to.position), km / 2);
+        const pm = map.latLngToContainerPoint(mid);
+        const pf = map.latLngToContainerPoint(from.position);
+        const pt = map.latLngToContainerPoint(to.position);
+        // Same direction as the whole line, centred on the middle point
+        const half = { x: (pt.x - pf.x) / 2, y: (pt.y - pf.y) / 2 };
+        lineLabel({ x: pm.x - half.x, y: pm.y - half.y }, { x: pm.x + half.x, y: pm.y + half.y }, formatDistance(km), 1);
+    }
+
+    measurements.forEach(points => {
+        let total = 0;
+        points.slice(1).forEach((point, i) => {
+            const leg = calculateDistance(points[i], point);
+            total += leg;
+            lineLabel(map.latLngToContainerPoint(points[i]), map.latLngToContainerPoint(point), formatDistance(leg), 1);
+        });
+        // Several legs also get their total at the end
+        if (points.length > 2) {
+            const p = map.latLngToContainerPoint(points[points.length - 1]);
+            const text = `Total ${formatDistance(total)}`;
+            const end = { x: p.x - 4, y: p.y - 4, w: 8, h: 8 };
+            labels.push({ text, line: true, priority: 1, own: end, candidates: markerLabelCandidates(end, labelWidth(text), LABEL_HEIGHT, true) });
+        }
+    });
+
+    const placed = [];
+    labels.sort((a, b) => a.priority - b.priority).forEach(label => {
+        const obstacles = icons.filter(icon => icon !== label.own);
+        let best = null;
+        let bestCost = Infinity;
+        for (const box of label.candidates) {
+            let cost = 0;
+            placed.forEach(other => { cost += boxOverlap(box, other) * 4; });
+            obstacles.forEach(icon => { cost += boxOverlap(box, icon); });
+            cost += box.w * box.h - boxOverlap(box, view); // keep labels inside the map
+            if (cost < bestCost) {
+                best = box;
+                bestCost = cost;
+                if (cost === 0) break;
+            }
+        }
+        placed.push({ ...best, text: label.text, color: label.color, line: label.line });
+    });
+
+    return placed.filter(label => boxOverlap(label, view) > 0);
+}
+
+let labelFrame = null; // pending layout timer
+
+// Re-layout labels once after a batch of changes to markers, lines or the view
+function scheduleLabels() {
+    if (labelFrame !== null) return;
+    labelFrame = setTimeout(() => {
+        labelFrame = null;
+        layoutLabels();
+    });
+}
+
+function layoutLabels() {
+    labelPane.innerHTML = '';
+    computeLabelLayout().forEach(label => {
+        const style = labelStyle(label);
+        const div = document.createElement('div');
+        div.className = 'map-label';
+        div.textContent = label.text;
+        const pos = map.containerPointToLayerPoint([label.x, label.y]);
+        Object.assign(div.style, {
+            left: `${pos.x}px`,
+            top: `${pos.y}px`,
+            width: `${label.w}px`,
+            height: `${label.h}px`,
+            lineHeight: `${label.h - 2}px`,
+            background: style.background,
+            borderColor: style.border,
+            color: style.text
+        });
+        labelPane.appendChild(div);
+    });
+    labelPane.hidden = false;
+}
+
+// Labels are hidden during zoom animations and laid out again for the new zoom
+map.on('zoomstart', () => { labelPane.hidden = true; });
+map.on('zoomend moveend resize', scheduleLabels);
+document.fonts?.ready.then(scheduleLabels);
 
 // Receivers stay in the list between signals; for each signal you only tick the ones
 // that received it and enter their bearings
@@ -215,6 +414,7 @@ function renderReceivers() {
     bearingList.innerHTML = '';
     document.getElementById('receiver-empty').hidden = receivers.length > 0;
     document.getElementById('bearing-empty').hidden = receivers.length > 0;
+    document.getElementById('receiver-count').textContent = receivers.length;
 
     receivers.forEach((receiver, index) => {
         const color = receiverColor(receiver);
@@ -283,9 +483,46 @@ function newSignal() {
         receiver.enabled = false;
     });
     ['report-time', 'report-sign', 'report-freq'].forEach(id => { document.getElementById(id).value = ''; });
+    // The previous target stays on the map as a POI; the next triangulation adds a new one
+    currentTarget = null;
+    triangulatedGeometry = null;
     renderReceivers();
     drawVectors();
-    clearTarget();
+    renderTargetPanel();
+    saveState();
+}
+
+// Empty the session without saving the intermediate state
+function resetSession() {
+    setMapTool(null);
+    restoring = true;
+    try {
+        receivers = [];
+        receiverCount = 0;
+        ['report-time', 'report-sign', 'report-freq'].forEach(id => { document.getElementById(id).value = ''; });
+        poiLayer.clearLayers();
+        pois = [];
+        poiCount = 0;
+        currentTarget = null;
+        triangulatedGeometry = null;
+        targetStale = false;
+        distancePair = { from: null, to: null };
+        clearMeasurements();
+    } finally {
+        restoring = false;
+    }
+}
+
+// Remove everything: receivers, signal, POIs (including targets) and measurements
+function clearAll() {
+    if (!confirm('Clear everything? This removes all receivers, POIs, targets and measurements.')) return;
+    resetSession();
+    document.getElementById('receiver-panel').open = true;
+    renderReceivers();
+    drawVectors();
+    renderPoiList();
+    renderTargetPanel();
+    saveState();
 }
 
 // Process the input data
@@ -394,7 +631,7 @@ function drawVectors() {
         }
 
         L.marker(d.position, {
-                icon: rxIcon(d.name, lineColor),
+                icon: rxIcon(lineColor),
                 exportAs: { kind: 'rx', name: d.name, color: lineColor }
             })
             .addTo(vectorLayer)
@@ -404,27 +641,43 @@ function drawVectors() {
         `);
     });
 
-    // A target computed from different vectors is out of date
-    if (targetLocation && JSON.stringify(lines) !== triangulatedGeometry) {
-        clearTarget();
+    // A target computed from different vectors is out of date until triangulated again
+    const stale = currentTarget !== null && JSON.stringify(lines) !== triangulatedGeometry;
+    if (stale !== targetStale) {
+        targetStale = stale;
+        renderTargetPanel();
     }
 
+    scheduleLabels();
     return lines;
 }
 
-function clearTarget() {
-    resultsLayer.clearLayers();
-    targetLocation = null;
-    triangulatedGeometry = null;
-    document.getElementById('result-coords').textContent = 'Coordinates: Awaiting triangulation...';
-    document.getElementById('target-details').hidden = true;
-    renderPoiList();
-    saveState();
+// Show the current signal's target (its POI can be moved or renamed in the POI list)
+function renderTargetPanel() {
+    const coords = document.getElementById('result-coords');
+    const details = document.getElementById('target-details');
+    if (!currentTarget) {
+        coords.textContent = 'Coordinates: Awaiting triangulation...';
+        details.hidden = true;
+        return;
+    }
+    coords.textContent = `${currentTarget.name}: ${formatCoords(currentTarget.position)}`;
+    const confidence = document.getElementById('confidence-value');
+    confidence.textContent = currentTarget.confidence || '—';
+    confidence.style.color = CONFIDENCE_COLORS[currentTarget.confidence] || '';
+    document.getElementById('target-stale').hidden = !targetStale;
+    details.hidden = false;
+}
+
+function defaultTargetName() {
+    const sign = document.getElementById('report-sign').value.trim();
+    const freq = document.getElementById('report-freq').value.trim();
+    const label = [sign, freq && `${freq} MHz`].filter(Boolean).join(' ');
+    return label || `Target ${pois.filter(p => p.type === 'target').length + 1}`;
 }
 
 // Calculate the intersection of the bearing vectors and mark the target
 function calculateIntersection(data, { silent = false } = {}) {
-    resultsLayer.clearLayers();
     drawVectors();
 
     const lines = data.map(d => ({
@@ -436,38 +689,30 @@ function calculateIntersection(data, { silent = false } = {}) {
     const bounds = L.latLngBounds(data.map(d => d.position));
 
     const intersection = calculateGeodesicIntersection(lines);
-    targetLocation = intersection;
-    triangulatedGeometry = intersection ? JSON.stringify(lines) : null;
-    renderPoiList();
-    saveState();
     if (intersection) {
-        // Add intersection point to bounds
         bounds.extend(intersection);
 
-        // Add marker for the intersection point
-        L.marker(intersection, {
-                icon: targetIcon,
-                exportAs: { kind: 'target' }
-            })
-            .addTo(resultsLayer);
-
-        // Update coordinates display
-        document.getElementById('result-coords').textContent =
-            `Coordinates: ${intersection[0].toFixed(6)}, ${intersection[1].toFixed(6)}`;
-
-        // Add a small padding to the bounds and fit the map to show all points
-        map.fitBounds(bounds.pad(0.3));
-
-        updateConfidenceLevel(lines, intersection);
-        document.getElementById('target-details').hidden = false;
+        // Re-triangulating the same signal moves its target instead of adding another
+        if (currentTarget && pois.includes(currentTarget)) {
+            currentTarget.position = intersection;
+            currentTarget.marker.setLatLng(intersection);
+        } else {
+            currentTarget = addPoi(intersection, defaultTargetName(), 'target');
+        }
+        currentTarget.confidence = confidenceLevel(lines, intersection);
+        triangulatedGeometry = JSON.stringify(lines);
+        targetStale = false;
+        renderPoiList();
+        renderTargetPanel();
+        saveState();
     } else {
         if (!silent) alert(`No intersection found. Check that the bearings converge and are not parallel.`);
         document.getElementById('result-coords').textContent = 'Coordinates: No valid intersection found';
         document.getElementById('target-details').hidden = true;
-
-        // If no intersection, just fit to measurement points
-        map.fitBounds(bounds.pad(0.3));
     }
+
+    // Fit the map to the receivers and the target
+    map.fitBounds(bounds.pad(0.3));
 }
 
 // Bearing lines run along the great circle almost to the antipode (half the
@@ -619,8 +864,15 @@ function geodesicIntersection([lat1, lng1], brng1, [lat2, lng2], brng2) {
     return [(φ3 * 180) / Math.PI, (λ3 * 180) / Math.PI];
 }
 
-// Calculate confidence level based on intersection spread
-function updateConfidenceLevel(lines, intersection) {
+const CONFIDENCE_COLORS = {
+    'Very High': '#51cf66',
+    'High': '#94d82d',
+    'Medium': '#fcc419',
+    'Low': '#fa5252'
+};
+
+// Confidence level based on intersection spread
+function confidenceLevel(lines, intersection) {
     const distances = lines.map(line => {
         return calculateDistance(line.start, intersection);
     });
@@ -639,17 +891,7 @@ function updateConfidenceLevel(lines, intersection) {
     const avgWidth = lines.reduce((sum, line) => sum + (line.width || 0), 0) / lines.length;
     if (avgWidth >= 30) level += 2;
     else if (avgWidth >= 10) level += 1;
-    const confidence = levels[Math.min(level, levels.length - 1)];
-
-    const confidenceElement = document.getElementById('confidence-value');
-    confidenceElement.textContent = confidence;
-
-    // Update confidence indicator color
-    confidenceElement.style.color =
-        confidence === "Very High" ? "#51cf66" :
-        confidence === "High" ? "#94d82d" :
-        confidence === "Medium" ? "#fcc419" :
-        "#fa5252";
+    return levels[Math.min(level, levels.length - 1)];
 }
 
 // Calculate distance between two points in km
@@ -665,15 +907,6 @@ function calculateDistance(point1, point2) {
         Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
-}
-
-// Save the triangulated target as a transmitter POI
-function addTargetAsTransmitter() {
-    if (!targetLocation) return;
-    const sign = document.getElementById('report-sign').value.trim();
-    const name = prompt('Transmitter name:', sign || `TX ${poiCount + 1}`);
-    if (name === null) return;
-    addPoi([...targetLocation], name.trim(), 'transmitter');
 }
 
 // Render the map with its lines and markers onto a canvas. The tiles already on screen
@@ -755,19 +988,24 @@ async function renderMapCanvas() {
         ctx.restore();
     });
 
-    // Markers outside the exported frame are skipped, labels included
-    const inFrame = ({ x, y }) => x >= 0 && y >= 0 && x <= size.x && y <= size.y;
-    const order = { poi: 0, rx: 1, target: 2 }; // target on top
+    // Measurement points
+    measurements.flat().forEach(point => {
+        const p = map.latLngToContainerPoint(point);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4, 0, 2 * Math.PI);
+        ctx.fillStyle = '#fcc419';
+        ctx.fill();
+    });
+
+    // Icons (targets on top), then the same label layout as on screen
+    const order = o => o.kind === 'rx' ? 1 : o.type === 'target' ? 2 : 0;
     overlays
-        .filter(o => o.kind in order)
-        .sort((a, b) => order[a.kind] - order[b.kind])
+        .sort((a, b) => order(a) - order(b))
         .forEach(o => {
             const p = map.latLngToContainerPoint(o.position);
-            if (!inFrame(p)) return;
-            if (o.kind === 'rx') drawRxOnCanvas(ctx, p, o.name, o.color);
-            else if (o.kind === 'poi') drawPoiOnCanvas(ctx, p, o.name, o.type);
-            else drawTargetOnCanvas(ctx, p);
+            drawIconOnCanvas(ctx, markerIconSpec(o), p, markerColor(o));
         });
+    computeLabelLayout().forEach(label => drawLabelOnCanvas(ctx, label));
 
     return canvas;
 }
@@ -842,42 +1080,23 @@ function drawIconOnCanvas(ctx, icon, { x, y }, color) {
     ctx.restore();
 }
 
-// Rounded dark label matching the on-map .map-label style
-function drawLabelOnCanvas(ctx, text, x, y, color, align = 'left') {
+// Draw a placed label (see computeLabelLayout) like the on-map .map-label
+function drawLabelOnCanvas(ctx, label) {
+    const style = labelStyle(label);
     ctx.save();
-    ctx.font = '600 12px "Roboto Mono", monospace';
-    const padX = 6;
-    const h = 20;
-    const w = ctx.measureText(text).width + padX * 2;
-    const left = align === 'center' ? x - w / 2 : x;
     ctx.beginPath();
-    ctx.roundRect(left, y - h / 2, w, h, 4);
-    ctx.fillStyle = 'rgba(15, 17, 23, 0.85)';
+    ctx.roundRect(label.x + 0.5, label.y + 0.5, label.w - 1, label.h - 1, 4);
+    ctx.fillStyle = style.background;
     ctx.fill();
     ctx.lineWidth = 1;
-    ctx.strokeStyle = color;
+    ctx.strokeStyle = style.border;
     ctx.stroke();
-    ctx.fillStyle = color;
+    ctx.font = LABEL_FONT;
+    ctx.fillStyle = style.text;
+    ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(text, left + padX, y + 1);
+    ctx.fillText(label.text, label.x + label.w / 2, label.y + label.h / 2 + 1);
     ctx.restore();
-}
-
-function drawRxOnCanvas(ctx, p, name, color) {
-    drawIconOnCanvas(ctx, RX_ICON, p, color);
-    drawLabelOnCanvas(ctx, name, p.x + 14, p.y - 18, color);
-}
-
-// Matches poiIcon on the map: symbol by type, label centred above it
-function drawPoiOnCanvas(ctx, p, name, typeKey) {
-    const type = POI_TYPES[typeKey] || POI_TYPES.poi;
-    drawIconOnCanvas(ctx, type.icon, p, type.color);
-    drawLabelOnCanvas(ctx, name, p.x, p.y - type.icon.anchor[1] - 12, type.color, 'center');
-}
-
-function drawTargetOnCanvas(ctx, p) {
-    drawIconOnCanvas(ctx, TARGET_ICON, p, '#ff3b3b');
-    drawLabelOnCanvas(ctx, 'TARGET', p.x, p.y - 32, '#ff3b3b', 'center');
 }
 
 // Current time as HH:MM, rounded to the nearest 10 minutes
@@ -906,7 +1125,7 @@ async function copyReport() {
         sources.forEach(s => {
             txtContent += `AZ ${s.name}: ${s.bearing ? `${s.bearing}°` : ''}\n`;
         });
-        txtContent += `Triangulation: ${targetLocation ? formatCoords(targetLocation) : '—'}\n`;
+        txtContent += `Triangulation: ${currentTarget ? formatCoords(currentTarget.position) : '—'}\n`;
         txtContent += `Interp:`;
     } catch (error) {
         console.error('Error building report:', error);
@@ -950,6 +1169,7 @@ function setMapTool(tool) {
 
     document.getElementById('poi-mode').classList.toggle('active', activeTool === 'poi');
     document.getElementById('measure-mode').classList.toggle('active', activeTool === 'measure');
+    document.getElementById('distance-mode').classList.toggle('active', activeTool === 'distance');
     document.getElementById('map-container').classList.toggle('tool-active', activeTool !== null);
 
     // Double-click finishes a measurement instead of zooming
@@ -958,8 +1178,30 @@ function setMapTool(tool) {
 
     document.getElementById('map-tool-hint').textContent =
         activeTool === 'poi' ? 'Click the map to place a POI (Esc to stop)' :
-        activeTool === 'measure' ? 'Click to add points, double-click or Esc to finish' :
+        activeTool === 'measure' ? 'Click to add points (click a POI to snap to it), double-click or Esc to finish' :
+        activeTool === 'distance' ? 'Click a POI to measure from, then another to measure to (Esc to stop)' :
         '';
+
+    // Clicking a POI with a tool active picks it instead of opening its popup
+    renderPoiList();
+}
+
+// A POI marker was clicked: tools that work with POIs use its exact position
+function onPoiClick(poi) {
+    if (activeTool === 'measure') {
+        addMeasurePoint(poi.marker.getLatLng());
+    } else if (activeTool === 'distance') {
+        // First click picks From, second picks To, a third starts a new pair
+        if (distancePair.from === null || distancePair.to !== null) distancePair = { from: poi.id, to: null };
+        else distancePair.to = poi.id;
+        renderDistanceTool();
+        saveState();
+
+        const from = pois.find(p => p.id === distancePair.from);
+        document.getElementById('map-tool-hint').textContent = distancePair.to === null ?
+            `From ${from.name}: click the second POI` :
+            `${from.name} → ${poi.name}: ${document.getElementById('distance-result').textContent}. Click a POI to start again`;
+    }
 }
 
 function poiType(poi) {
@@ -968,9 +1210,10 @@ function poiType(poi) {
 
 function poiIcon(poi) {
     const type = poiType(poi);
+    const svg = iconSvg(type.icon, type.color);
     return L.divIcon({
         className: 'poi-marker',
-        html: `${iconSvg(type.icon, type.color)}<span class="map-label" style="color: ${type.color};">${escapeHtml(poi.name)}</span>`,
+        html: type.pulse ? `<div class="target-pulse">${svg}</div>` : svg,
         iconSize: type.icon.size,
         iconAnchor: type.icon.anchor
     });
@@ -980,6 +1223,7 @@ function poiIcon(poi) {
 function updatePoiMarker(poi) {
     poi.marker.options.exportAs = { kind: 'poi', name: poi.name, type: poi.type };
     poi.marker.setIcon(poiIcon(poi));
+    scheduleLabels();
 }
 
 function poiTypeSelect(selected, select = document.createElement('select')) {
@@ -988,23 +1232,26 @@ function poiTypeSelect(selected, select = document.createElement('select')) {
     return select;
 }
 
-// Add a point of interest
-function addPoi(position, name, type = 'poi') {
+// Add a point of interest; extra holds saved details such as a target's confidence
+function addPoi(position, name, type = 'poi', extra = {}) {
     poiCount++;
     type = type in POI_TYPES ? type : 'poi';
     const poi = {
         id: poiCount,
         name: name || `${POI_TYPES[type].label} ${poiCount}`,
         type,
-        position
+        position,
+        confidence: extra.confidence || null
     };
 
     poi.marker = L.marker(position, { icon: poiIcon(poi) }).addTo(poiLayer);
+    poi.marker.on('click', () => onPoiClick(poi));
     updatePoiMarker(poi);
 
     pois.push(poi);
     renderPoiList();
     saveState();
+    return poi;
 }
 
 function removePoi(id) {
@@ -1012,6 +1259,11 @@ function removePoi(id) {
     if (!poi) return;
     poiLayer.removeLayer(poi.marker);
     pois = pois.filter(p => p.id !== id);
+    if (poi === currentTarget) {
+        currentTarget = null;
+        triangulatedGeometry = null;
+        targetStale = false;
+    }
     renderPoiList();
     saveState();
 }
@@ -1053,28 +1305,63 @@ function blurOnEnter(input) {
     });
 }
 
-// Rebuild the POI list and marker popups (distances depend on the current target)
+// Distance tool: the two POIs picked, by id
+let distancePair = { from: null, to: null };
+
+// Show the distance and bearing between the two picked POIs, with a line on the map
+function renderDistanceTool() {
+    document.getElementById('distance-tool').hidden = pois.length < 2;
+    ['from', 'to'].forEach(end => {
+        if (!pois.some(p => p.id === distancePair[end])) distancePair[end] = null;
+        const select = document.getElementById(`distance-${end}`);
+        select.innerHTML = '';
+        select.add(new Option(end === 'from' ? 'From…' : 'To…', ''));
+        pois.forEach(poi => select.add(new Option(poi.name, poi.id)));
+        select.value = distancePair[end] ?? '';
+    });
+
+    distanceLayer.clearLayers();
+    scheduleLabels();
+    const result = document.getElementById('distance-result');
+    const from = pois.find(p => p.id === distancePair.from);
+    const to = pois.find(p => p.id === distancePair.to);
+    if (!from || !to || from === to) {
+        result.textContent = '';
+        return;
+    }
+
+    const km = calculateDistance(from.position, to.position);
+    const bearing = calculateBearing(from.position, to.position);
+    const text = `${formatDistance(km)} @ ${bearing.toFixed(1)}°`;
+    result.textContent = text;
+    L.polyline(greatCirclePath(from.position, bearing, km), {
+            color: '#fcc419',
+            weight: 2,
+            opacity: 0.9,
+            dashArray: '2 6'
+        })
+        .addTo(distanceLayer);
+}
+
+// Rebuild the POI list, marker popups, distance tool and target panel
 function renderPoiList() {
     const list = document.getElementById('poi-list');
     list.innerHTML = '';
     document.getElementById('poi-empty').hidden = pois.length > 0;
 
     pois.forEach(poi => {
-        let distanceText = 'No target';
-        if (targetLocation) {
-            const distance = calculateDistance(poi.position, targetLocation);
-            const bearing = calculateBearing(targetLocation, poi.position);
-            distanceText = `${formatDistance(distance)} @ ${bearing.toFixed(1)}°`;
+        poi.marker.unbindPopup();
+        if (!activeTool) {
+            poi.marker.bindPopup(`
+                <b>${escapeHtml(poi.name)}</b> (${poiType(poi).label})<br>
+                ${formatCoords(poi.position)}
+                ${poi.confidence ? `<br>Confidence: ${poi.confidence}` : ''}
+            `);
         }
-
-        poi.marker.bindPopup(`
-            <b>${escapeHtml(poi.name)}</b> (${poiType(poi).label})<br>
-            ${formatCoords(poi.position)}<br>
-            Distance to Target: ${distanceText}
-        `);
 
         const item = document.createElement('div');
         item.className = 'poi-item';
+        item.classList.toggle('current-target', poi === currentTarget);
 
         const locate = document.createElement('button');
         locate.type = 'button';
@@ -1121,10 +1408,15 @@ function renderPoiList() {
             renderPoiList();
             saveState();
         });
-        const distance = document.createElement('span');
-        distance.className = 'poi-distance mono';
-        distance.textContent = distanceText;
-        distance.title = 'Distance and bearing from the target';
+
+        // Triangulated targets keep the confidence of their fix
+        const info = document.createElement('span');
+        info.className = 'poi-info';
+        if (poi.confidence) {
+            info.textContent = poi.confidence;
+            info.style.color = CONFIDENCE_COLORS[poi.confidence];
+            info.title = 'Confidence of the triangulation';
+        }
 
         const removeButton = document.createElement('button');
         removeButton.type = 'button';
@@ -1133,9 +1425,13 @@ function renderPoiList() {
         removeButton.textContent = '✕';
         removeButton.addEventListener('click', () => removePoi(poi.id));
 
-        item.append(locate, nameInput, typeSelect, removeButton, coordsInput, distance);
+        item.append(locate, nameInput, typeSelect, removeButton, coordsInput, info);
         list.appendChild(item);
     });
+
+    renderDistanceTool();
+    renderTargetPanel();
+    scheduleLabels();
 }
 
 function escapeHtml(text) {
@@ -1187,13 +1483,9 @@ function addMeasurePoint(latlng) {
             fillOpacity: 1,
             weight: 1
         })
-        .addTo(measureLayer)
-        .bindTooltip(points.length === 1 ? 'Start' : formatDistance(currentMeasure.total), {
-            permanent: true,
-            direction: 'right',
-            className: 'measure-label'
-        });
+        .addTo(measureLayer);
     currentMeasure.layers.push(vertex);
+    scheduleLabels();
     saveState();
 
     document.getElementById('map-tool-hint').textContent = points.length === 1 ?
@@ -1209,12 +1501,14 @@ function finishMeasurement() {
         saveState();
     }
     currentMeasure = null;
+    scheduleLabels();
 }
 
 function clearMeasurements() {
     measureLayer.clearLayers();
     currentMeasure = null;
     measurements = [];
+    scheduleLabels();
     saveState();
     if (activeTool === 'measure') {
         document.getElementById('map-tool-hint').textContent = 'Click to add points, double-click or Esc to finish';
@@ -1254,8 +1548,16 @@ function buildState() {
         reportTime: document.getElementById('report-time').value,
         reportSign: document.getElementById('report-sign').value,
         reportFreq: document.getElementById('report-freq').value,
-        triangulated: targetLocation !== null,
-        pois: pois.map(poi => ({ name: poi.name, type: poi.type, position: poi.position })),
+        pois: pois.map(poi => ({
+            name: poi.name,
+            type: poi.type,
+            position: poi.position,
+            ...(poi.confidence && { confidence: poi.confidence })
+        })),
+        currentTarget: pois.indexOf(currentTarget), // -1 if none
+        targetGeometry: triangulatedGeometry,
+        distance: [distancePair.from, distancePair.to].map(id => pois.findIndex(p => p.id === id)),
+        receiversOpen: document.getElementById('receiver-panel').open,
         measurements: measurements.filter(points => points.length >= 2),
         baseLayer: activeBaseLayer,
         view: {
@@ -1290,7 +1592,12 @@ function applyState(state) {
         document.getElementById('report-sign').value = state.reportSign || '';
         document.getElementById('report-freq').value = state.reportFreq || '';
         (state.rows || []).forEach(values => addReceiver(values));
-        (state.pois || []).forEach(poi => addPoi(poi.position, poi.name, poi.type));
+        (state.pois || []).forEach(poi => addPoi(poi.position, poi.name, poi.type, poi));
+        currentTarget = pois[state.currentTarget] || null;
+        triangulatedGeometry = currentTarget ? state.targetGeometry || null : null;
+        const [from, to] = (state.distance || []).map(index => pois[index]?.id ?? null);
+        distancePair = { from: from ?? null, to: to ?? null };
+        document.getElementById('receiver-panel').open = state.receiversOpen ?? receivers.length === 0;
 
         (state.measurements || []).forEach(points => {
             points.forEach(([lat, lng]) => addMeasurePoint(L.latLng(lat, lng)));
@@ -1298,8 +1605,8 @@ function applyState(state) {
         });
         document.getElementById('map-tool-hint').textContent = '';
 
-        // Re-run the triangulation from the saved receivers
-        if (state.triangulated) {
+        // Sessions saved before targets were POIs only stored that a triangulation was done
+        if (state.triangulated && state.currentTarget === undefined) {
             const data = receivers.filter(r => r.enabled).map(readReceiver);
             if (data.length >= 2 && data.every(d => d.position && isValidBearing(d.bearing))) {
                 calculateIntersection(data, { silent: true });
@@ -1313,6 +1620,7 @@ function applyState(state) {
         restoring = false;
     }
 
+    drawVectors();
     renderPoiList();
     saveState();
 }
@@ -1360,23 +1668,7 @@ async function importPreset(file) {
     }
     if (!confirm('Importing replaces the current receivers, POIs and measurements. Continue?')) return;
 
-    // Clear the current session without saving the intermediate empty state
-    setMapTool(null);
-    restoring = true;
-    try {
-        receivers = [];
-        receiverCount = 0;
-        renderReceivers();
-        drawVectors();
-        clearTarget();
-        poiLayer.clearLayers();
-        pois = [];
-        poiCount = 0;
-        clearMeasurements();
-    } finally {
-        restoring = false;
-    }
-
+    resetSession();
     applyState(preset);
 }
 
@@ -1402,7 +1694,19 @@ document.getElementById('add-receiver').addEventListener('click', () => {
     document.querySelector('#receiver-list .receiver-item:last-child input').focus();
 });
 document.getElementById('new-signal').addEventListener('click', newSignal);
-document.getElementById('add-target-poi').addEventListener('click', addTargetAsTransmitter);
+document.getElementById('clear-all').addEventListener('click', clearAll);
+document.getElementById('receiver-panel').addEventListener('toggle', saveState);
+document.getElementById('open-receivers').addEventListener('click', () => {
+    document.getElementById('receiver-panel').open = true;
+    document.getElementById('add-receiver').click();
+});
+['from', 'to'].forEach(end => {
+    document.getElementById(`distance-${end}`).addEventListener('change', e => {
+        distancePair[end] = Number(e.target.value) || null;
+        renderDistanceTool();
+        saveState();
+    });
+});
 document.getElementById('report-time').addEventListener('input', saveState);
 document.getElementById('report-sign').addEventListener('input', saveState);
 document.getElementById('report-freq').addEventListener('input', saveState);
@@ -1420,6 +1724,7 @@ document.getElementById('preset-file').addEventListener('change', e => {
 });
 document.getElementById('poi-mode').addEventListener('click', () => setMapTool('poi'));
 document.getElementById('measure-mode').addEventListener('click', () => setMapTool('measure'));
+document.getElementById('distance-mode').addEventListener('click', () => setMapTool('distance'));
 document.getElementById('clear-measure').addEventListener('click', clearMeasurements);
 document.getElementById('add-poi').addEventListener('click', addPoiFromForm);
 ['poi-name', 'poi-coords'].forEach(id => {
@@ -1432,6 +1737,7 @@ poiTypeSelect('poi', document.getElementById('poi-type'));
 
 // Restore the previous session, or start with two empty receivers
 if (!loadState()) {
+    document.getElementById('receiver-panel').open = true;
     addReceiver();
     addReceiver();
     renderPoiList();
